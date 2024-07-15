@@ -50,6 +50,7 @@ class GaussianSplattingDecoder(BaseModule):
                  num_surfaces=1,
                  offset_scale=0.05,
                  gs_scale=0.05,
+                 vis_gt=False,
                  **kwargs):
         super().__init__()
 
@@ -57,6 +58,7 @@ class GaussianSplattingDecoder(BaseModule):
         self.min_depth, self.max_depth = depth_range
 
         self.semantic_head = semantic_head
+        self.vis_gt = vis_gt  # NOTE: FOR DEBUG
 
         self.learn_gs_scale_rot = learn_gs_scale_rot
         self.offset_scale = offset_scale
@@ -146,6 +148,7 @@ class GaussianSplattingDecoder(BaseModule):
 
     def forward(self, 
                 inputs,
+                vis_gt=False,
                 **kwargs):
         """Foward function
 
@@ -163,10 +166,25 @@ class GaussianSplattingDecoder(BaseModule):
             Tuple: rendered depth, rgb images and semantic features
         """
         # get occupancy features
-        density_prob, semantic, volume_feat = self.get_occ_features(inputs)
+        density_prob = inputs['density_prob']  # B, 1, X, Y, Z
+        semantic = inputs['semantic'] # B, c, X, Y, Z
 
         intricics, pose_spatial = inputs['intrinsics'], inputs['pose_spatial']
 
+        if vis_gt:
+            semantic_dummy = repeat(semantic[:, 0:1], 'b dim1 x y z -> b (dim1 C) x y z', C=17).float()
+            semantic_dummy = torch.rand(semantic_dummy.shape).to(semantic_dummy.device)
+            with torch.no_grad():
+                render_depth, render_rgb, render_semantic = self.visualize_gaussian(
+                    density_prob,
+                    semantic,
+                    semantic_dummy,
+                    intricics,
+                    pose_spatial
+                )
+                return render_depth, render_rgb, render_semantic
+        
+        volume_feat = inputs['volume_feat']  # B, X, Y, Z, C
         render_depth, render_rgb, render_semantic = self.train_gaussian_rasterization_v2(
             density_prob,
             None,
@@ -178,13 +196,6 @@ class GaussianSplattingDecoder(BaseModule):
         render_depth = render_depth.clamp(self.min_depth, self.max_depth)
         return render_depth, render_rgb, render_semantic
 
-    def get_occ_features(self, inputs):
-        occupancy = inputs['occupancy_score']  # B, 1, X, Y, Z
-        B, _, X, Y, Z = occupancy.shape
-        semantic = inputs['semantic'] # B, C, X, Y, Z
-        feature_map = inputs['volume_feat']  # B, C, X, Y, Z
-        return occupancy, semantic, feature_map
-    
     def train_gaussian_rasterization(self, 
                                      density_prob, 
                                      rgb_recon, 
@@ -383,14 +394,14 @@ class GaussianSplattingDecoder(BaseModule):
         intrinsics[..., 0, :] /= self.render_w
         intrinsics[..., 1, :] /= self.render_h
 
-        transform = torch.Tensor([[0, 1, 0, 0],
-                                  [1, 0, 0, 0],
-                                  [0, 0, 1, 0],
-                                  [0, 0, 0, 1]]).to(device)
-        extrinsics = transform.unsqueeze(0).unsqueeze(0) @ extrinsics
+        # transform = torch.Tensor([[0, 1, 0, 0],
+        #                           [1, 0, 0, 0],
+        #                           [0, 0, 1, 0],
+        #                           [0, 0, 0, 1]]).to(device)
+        # extrinsics = transform.unsqueeze(0).unsqueeze(0) @ extrinsics
         
         bs = density_prob.shape[0]
-        xyzs = repeat(self.volume_xyz, 'h w d dim3 -> bs h w d dim3', bs=bs)
+        xyzs = repeat(self.volume_xyz, 'h w d dim3 -> bs h w d dim3', bs=bs).to(device)
         xyzs = rearrange(xyzs, 'b h w d dim3 -> b (h w d) dim3') # (bs, num, 3)
 
         density_prob = rearrange(density_prob, 'b dim1 h w d -> (b dim1) (h w d)')

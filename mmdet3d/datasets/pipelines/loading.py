@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import mmcv
 import numpy as np
+import os
 
 from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.builder import PIPELINES
@@ -667,3 +668,26 @@ class LoadAnnotations3D(LoadAnnotations):
         repr_str += f'{indent_str}with_bbox_depth={self.with_bbox_depth}, '
         repr_str += f'{indent_str}poly2mask={self.poly2mask})'
         return repr_str
+
+
+@PIPELINES.register_module()
+class LoadOcc3DGTFromFile(object):
+    """Load the occupancy GT from the Occ3D-nuScenes dataset.
+    """
+    def __call__(self, results):
+        assert 'occ_gt_path' in results, \
+            'occ_gt_path should be in results'
+        
+        occ_gt_path = results['occ_gt_path']
+        occ_gt_path = os.path.join(occ_gt_path, "labels.npz")
+
+        occ_labels = np.load(occ_gt_path)
+        semantics = occ_labels['semantics']
+        mask_lidar = occ_labels['mask_lidar']
+        mask_camera = occ_labels['mask_camera']
+
+        results['voxel_semantics'] = semantics
+        results['mask_lidar'] = mask_lidar
+        results['mask_camera'] = mask_camera
+
+        return results

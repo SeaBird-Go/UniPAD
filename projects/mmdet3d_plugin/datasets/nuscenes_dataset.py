@@ -5,6 +5,7 @@ import pyquaternion
 import tempfile
 from nuscenes.utils.data_classes import Box as NuScenesBox
 from os import path as osp
+from pyquaternion import Quaternion
 
 import mmdet3d
 from mmdet.datasets import DATASETS
@@ -241,6 +242,9 @@ class NuScenesSweepDataset(Custom3DDataset):
         if self.return_gt_info:
             input_dict["info"] = info
 
+        if "occ_path" in info:
+            input_dict["occ_gt_path"] = info["occ_path"]
+
         # convert file path to nori and process sweep number in loading function
         if self.modality["use_lidar"]:
             input_dict["sweeps"] = info["sweeps"]
@@ -251,6 +255,7 @@ class NuScenesSweepDataset(Custom3DDataset):
             # add lidar2img matrix
             lidar2cam_rts = []
             cam_intrinsics = []
+            cam2camego_list = []
             for cam_type, cam_info in info["cams"].items():
                 image_paths.append(cam_info["data_path"])
                 # obtain lidar to image transformation matrix
@@ -267,12 +272,20 @@ class NuScenesSweepDataset(Custom3DDataset):
                 lidar2cam_rts.append(lidar2cam_rt.T)
                 cam_intrinsics.append(viewpad)
 
+                # obtain the camera to ego transformation matrix
+                cam2camego = np.eye(4, dtype=np.float32)
+                cam2camego[:3, :3] = Quaternion(
+                    cam_info['sensor2ego_rotation']).rotation_matrix
+                cam2camego[:3, 3] = cam_info['sensor2ego_translation']
+                cam2camego_list.append(cam2camego)
+
             input_dict.update(
                 dict(
                     img_filename=image_paths,
                     lidar2img=lidar2img_rts,
                     lidar2cam=lidar2cam_rts,
                     cam_intrinsic=cam_intrinsics,
+                    cam2camego=cam2camego_list,
                 )
             )
             # use cam sweeps

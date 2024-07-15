@@ -39,9 +39,30 @@ class UVTRSSL3DGS(UVTRSSL):
     ):
         super(UVTRSSL3DGS, self).__init__(**kwargs)
 
+    def forward_train(self, 
+                      points=None, 
+                      img_metas=None, 
+                      img=None,
+                      **kwargs):
+        """Forward training function.
+        Returns:
+            dict: Losses of different branches.
+        """
+        pts_feats, img_feats, img_depth = self.extract_feat(
+            points=points, img=img, img_metas=img_metas
+        )
+        losses = dict()
+        losses_pts = self.forward_pts_train(
+            pts_feats, img_feats, points, img, img_metas, img_depth,
+            **kwargs
+        )
+        losses.update(losses_pts)
+        return losses
+    
     @force_fp32(apply_to=("pts_feats", "img_feats"))
     def forward_pts_train(
-        self, pts_feats, img_feats, points, img, img_metas, img_depth
+        self, pts_feats, img_feats, points, 
+        img, img_metas, img_depth, **kwargs
     ):
         """Forward function for point cloud branch.
         Args:
@@ -57,7 +78,9 @@ class UVTRSSL3DGS(UVTRSSL):
             dict: Losses of each branch.
         """
         out_dict = self.pts_bbox_head(
-            pts_feats, img_feats, img_metas, img_depth
+            pts_feats, img_feats, 
+            img_metas, img_depth, 
+            img, **kwargs
         )
         losses = self.pts_bbox_head.loss(out_dict, img_metas)
         if self.with_depth_head and hasattr(self.pts_bbox_head.view_trans, "loss"):

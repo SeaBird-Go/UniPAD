@@ -53,7 +53,7 @@ class CollectUnified3D(object):
     def __init__(self,
                  keys,
                  meta_keys=('filename', 'ori_shape', 'img_shape', 
-                            'lidar2img', 'lidar2cam', 'cam_intrinsic',
+                            'lidar2img', 'lidar2cam', 'cam_intrinsic', 'cam2camego',
                             'depth2img', 'cam2img', 'pad_shape', 'pad_before_shape',
                             'scale_factor', 'flip', 'pcd_horizontal_flip',
                             'pcd_vertical_flip', 'box_mode_3d', 'box_type_3d',

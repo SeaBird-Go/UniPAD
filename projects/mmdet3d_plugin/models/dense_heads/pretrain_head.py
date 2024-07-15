@@ -18,7 +18,33 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models import HEADS
 from mmdet3d.models import builder
 
+from .nerf_utils import visualize_image_semantic_depth_pair
 from .. import utils
+
+
+OCC3D_PALETTE = torch.Tensor([
+    [0, 0, 0],
+    [255, 120, 50],  # barrier              orangey
+    [255, 192, 203],  # bicycle              pink
+    [255, 255, 0],  # bus                  yellow
+    [0, 150, 245],  # car                  blue
+    [0, 255, 255],  # construction_vehicle cyan
+    [200, 180, 0],  # motorcycle           dark orange
+    [255, 0, 0],  # pedestrian           red
+    [255, 240, 150],  # traffic_cone         light yellow
+    [135, 60, 0],  # trailer              brown
+    [160, 32, 240],  # truck                purple
+    [255, 0, 255],  # driveable_surface    dark pink
+    [139, 137, 137], # other_flat           dark grey
+    [75, 0, 75],  # sidewalk             dard purple
+    [150, 240, 80],  # terrain              light green
+    [230, 230, 250],  # manmade              white
+    [0, 175, 0],  # vegetation           green
+    [0, 255, 127],  # ego car              dark cyan
+    [255, 99, 71],
+    [0, 191, 255],
+    [125, 125, 125]
+])
 
 
 @HEADS.register_module()
@@ -29,8 +55,10 @@ class PretrainHead(BaseModule):
         view_cfg=None,
         uni_conv_cfg=None,
         render_head_cfg=None,
+        render_scale=(1, 1),
         use_semantic=False,
         semantic_class=17,
+        vis_gt=False,
         **kwargs
     ):
         super().__init__()
@@ -38,6 +66,7 @@ class PretrainHead(BaseModule):
         self.in_channels = in_channels
 
         self.use_semantic = use_semantic
+        self.vis_gt = vis_gt
 
         if view_cfg is not None:
             vtrans_type = view_cfg.pop('type', 'Uni3DViewTrans')
@@ -59,6 +88,8 @@ class PretrainHead(BaseModule):
         if render_head_cfg is not None:
             self.render_head = builder.build_head(render_head_cfg)
 
+        self.render_scale = render_scale
+
         out_dim = uni_conv_cfg["out_channels"]
         if use_semantic:
             self.semantic_head = nn.Sequential(
@@ -78,7 +109,60 @@ class PretrainHead(BaseModule):
                 pts_feats, 
                 img_feats, 
                 img_metas, 
-                img_depth):
+                img_depth,
+                img_inputs,
+                **kwargs):
+
+        output = dict()
+
+        # Prepare the projection parameters
+        lidar2img, lidar2cam, intrinsics = [], [], []
+        for img_meta in img_metas:
+            lidar2img.append(img_meta["lidar2img"])
+            lidar2cam.append(img_meta["lidar2cam"])
+            intrinsics.append(img_meta["cam_intrinsic"])
+        lidar2img = np.asarray(lidar2img)  # (bs, 6, 1, 4, 4)
+        lidar2cam = np.asarray(lidar2cam)  # (bs, 6, 1, 4, 4)
+        intrinsics = np.asarray(intrinsics)
+
+        ref_tensor = img_feats[0]
+
+        intrinsics = ref_tensor.new_tensor(intrinsics)
+        pose_spatial = torch.inverse(
+            ref_tensor.new_tensor(lidar2cam)
+        )
+
+
+        output['pose_spatial'] = pose_spatial[:, :, 0]
+        output['intrinsics'] = intrinsics[:, :, 0]  # (bs, 6, 4, 4)
+        output['intrinsics'][:, :, 0] *= self.render_scale[1]
+        output['intrinsics'][:, :, 1] *= self.render_scale[0]
+
+        if self.vis_gt:
+            ## NOTE: due to the occ gt is labelled in the ego coordinate, we need to
+            # use the cam2ego matrix as ego matrix
+            cam2camego = []
+            for img_meta in img_metas:
+                cam2camego.append(img_meta["cam2camego"])
+            cam2camego = np.asarray(cam2camego)  # (bs, 6, 1, 4, 4)
+            output['pose_spatial'] = ref_tensor.new_tensor(cam2camego)
+
+            gt_data_dict = self.prepare_gt_data(**kwargs)
+            output.update(gt_data_dict)
+            render_results = self.render_head(output, vis_gt=True)
+            
+            ## visualiza the results
+            render_depth, rgb_pred, semantic_pred = render_results
+            # current_frame_img = torch.zeros_like(rgb_pred).cpu().numpy()
+            current_frame_img = img_inputs.cpu().numpy()
+            visualize_image_semantic_depth_pair(
+                current_frame_img[0],
+                rgb_pred[0].permute(0, 2, 3, 1),
+                render_depth[0],
+                save_dir="results/vis/3dgs_baseline_gt"
+            )
+            exit()
+
         ## 1. Prepare the volume feature from the pts features and img features
         uni_feats = []
         if img_feats is not None:
@@ -92,38 +176,35 @@ class PretrainHead(BaseModule):
         uni_feats = self.uni_conv(uni_feats)  # (bs, c, z, y, x)
 
         ## 2. Prepare the features for rendering
-        output = dict()
-        
         _uni_feats = rearrange(uni_feats, 'b c z y x -> b x y z c')
 
         output['volume_feat'] = _uni_feats
 
         occupancy_output = self.occupancy_head(_uni_feats)
         occupancy_output = rearrange(occupancy_output, 'b x y z dim1 -> b dim1 x y z')
-        output['occupancy_score'] = occupancy_output  # density score
+        output['density_prob'] = occupancy_output  # density score
 
         semantic_output = self.semantic_head(_uni_feats) if self.use_semantic else None
         output['semantic'] = semantic_output
 
         ## 2. Start rendering, including neural rendering or 3DGS
-        lidar2img, lidar2cam, intrinsics = [], [], []
-        for img_meta in img_metas:
-            lidar2img.append(img_meta["lidar2img"])
-            lidar2cam.append(img_meta["lidar2cam"])
-            intrinsics.append(img_meta["cam_intrinsic"])
-        lidar2img = np.asarray(lidar2img)  # (bs, 6, 1, 4, 4)
-        lidar2cam = np.asarray(lidar2cam)  # (bs, 6, 1, 4, 4)
-        intrinsics = np.asarray(intrinsics)
-
-        intrinsics = uni_feats.new_tensor(intrinsics)
-        pose_spatial = torch.inverse(
-            uni_feats.new_tensor(lidar2cam)
-        )
-
-        output['pose_spatial'] = pose_spatial[:, :, 0]
-        output['intrinsics'] = intrinsics[:, :, 0]
-
         render_results = self.render_head(output)
         return render_results
     
+    def prepare_gt_data(self, **kwargs):
+        # (b, 200, 200, 16)
+        voxel_semantics = kwargs['voxel_semantics']
+        density_prob = rearrange(voxel_semantics, 'b x y z -> b () x y z')
+        density_prob = density_prob != 17
+        density_prob = density_prob.float()
+        density_prob[density_prob == 0] = -10  # scaling to avoid 0 in alphas
+        density_prob[density_prob == 1] = 10
+
+        output = dict()
+        output['density_prob'] = density_prob
+
+        semantic = OCC3D_PALETTE[voxel_semantics.long()].to(density_prob)
+        semantic = semantic.permute(0, 4, 1, 2, 3)  # to (b, 3, 200, 200, 16)
+        output['semantic'] = semantic
+        return output
         
