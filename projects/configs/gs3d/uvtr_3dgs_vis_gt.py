@@ -145,9 +145,14 @@ train_pipeline = [
     dict(type="PointShuffle"),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
+    dict(type="PointToMultiViewDepth",
+         render_scale=[render_size[0] / 900, 
+                      render_size[1] / 1600]),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
     dict(type="CollectUnified3D", keys=["points", "img",
-                                        "voxel_semantics"]),
+                                        "voxel_semantics",
+                                        "render_gt_depth", 
+                                        "render_gt_semantic"]),
 ]
 test_pipeline = [
     dict(

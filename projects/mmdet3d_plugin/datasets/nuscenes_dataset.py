@@ -245,6 +245,9 @@ class NuScenesSweepDataset(Custom3DDataset):
         if "occ_path" in info:
             input_dict["occ_gt_path"] = info["occ_path"]
 
+        if "lidarseg" in info:
+            input_dict["lidarseg"] = info["lidarseg"]
+
         # convert file path to nori and process sweep number in loading function
         if self.modality["use_lidar"]:
             input_dict["sweeps"] = info["sweeps"]

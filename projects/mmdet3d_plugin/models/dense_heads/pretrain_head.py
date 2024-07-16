@@ -185,11 +185,16 @@ class PretrainHead(BaseModule):
         output['density_prob'] = occupancy_output  # density score
 
         semantic_output = self.semantic_head(_uni_feats) if self.use_semantic else None
+        semantic_output = rearrange(semantic_output, 'b x y z C -> b C x y z')
         output['semantic'] = semantic_output
 
         ## 2. Start rendering, including neural rendering or 3DGS
         render_results = self.render_head(output)
         return render_results
+    
+    def loss(self, preds_dict, targets):
+        loss_dict = self.render_head.loss(preds_dict, targets)
+        return loss_dict
     
     def prepare_gt_data(self, **kwargs):
         # (b, 200, 200, 16)

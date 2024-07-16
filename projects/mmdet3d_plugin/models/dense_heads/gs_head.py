@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import cv2
-import os
+import torch_scatter
 import os.path as osp
 from einops import rearrange, repeat
 from mmdet3d.models.builder import HEADS
@@ -57,7 +57,14 @@ class GaussianSplattingDecoder(BaseModule):
         self.render_h, self.render_w = render_size
         self.min_depth, self.max_depth = depth_range
 
+        self.gs_mask = 'depth'
+
+        self.depth_loss_type = 'silog'
+
+        self.loss_weight = [1.0, 1.0, 1.0]
+
         self.semantic_head = semantic_head
+        self.img_recon_head = False
         self.vis_gt = vis_gt  # NOTE: FOR DEBUG
 
         self.learn_gs_scale_rot = learn_gs_scale_rot
@@ -149,6 +156,7 @@ class GaussianSplattingDecoder(BaseModule):
     def forward(self, 
                 inputs,
                 vis_gt=False,
+                return_loss=False,
                 **kwargs):
         """Foward function
 
@@ -182,19 +190,51 @@ class GaussianSplattingDecoder(BaseModule):
                     intricics,
                     pose_spatial
                 )
-                return render_depth, render_rgb, render_semantic
+            return render_depth, render_rgb, render_semantic
         
         volume_feat = inputs['volume_feat']  # B, X, Y, Z, C
-        render_depth, render_rgb, render_semantic = self.train_gaussian_rasterization_v2(
-            density_prob,
-            None,
-            semantic,
-            intricics,
-            pose_spatial,
-            volume_feat=volume_feat
+        render_depth, render_rgb, render_semantic, gaussians = \
+            self.train_gaussian_rasterization_v2(
+                density_prob,
+                None,
+                semantic,
+                intricics,
+                pose_spatial,
+                volume_feat=volume_feat
         )
         render_depth = render_depth.clamp(self.min_depth, self.max_depth)
-        return render_depth, render_rgb, render_semantic
+
+        ## compute the loss
+        # if not return_loss:
+        #     return render_depth, render_rgb, render_semantic
+        
+        # gs_loss = self.calculate_3dgs_loss(
+        #     render_depth, depths, depth_masks,
+        #     semantic_pred, semantic_gt,
+        #     rgb_pred, render_img_gt
+        # )
+
+        # if self.use_ssim_loss:
+        #     gs_photometric_loss = self.photometric_consistency_loss(intrinsic, pose_spatial, render_depth, render_img_gt)
+        #     gs_loss += gs_photometric_loss
+
+        # gs_loss += calculate_total_variation_loss(
+        #     occupancy, semantic, self.tv_occ_loss_weight, self.tv_sem_loss_weight, self.tv_mask_road
+        # )
+
+        # if self.sigma_loss_weight > 0 or self.sdf_estimation_loss_weight > 0:
+        #     sigma_loss, sdf_estimation_loss = self.gaussian_sigma_sdf_loss(
+        #         gaussians,
+        #         intrinsic,
+        #         pose_spatial,
+        #         depths
+        #     )
+        #     gs_loss += sigma_loss
+        #     gs_loss += sdf_estimation_loss
+        dec_output = {'render_depth': render_depth,
+                      'render_rgb': render_rgb,
+                      'render_semantic': render_semantic}
+        return dec_output
 
     def train_gaussian_rasterization(self, 
                                      density_prob, 
@@ -302,12 +342,13 @@ class GaussianSplattingDecoder(BaseModule):
         losses['loss_render_depth'] = loss_render_depth
 
         if self.semantic_head:
-            assert 'img_semantic' in target_dict.keys()
-            img_semantic = target_dict['img_semantic']
+            assert 'render_gt_semantic' in target_dict.keys()
+            semantic_gt = target_dict['render_gt_semantic']
 
             semantic_pred = pred_dict['render_semantic']
             
-            loss_render_sem = self.compute_semantic_loss(semantic_pred, img_semantic)
+            loss_render_sem = self.compute_semantic_loss(
+                semantic_pred, semantic_gt, ignore_index=255)
             if torch.isnan(loss_render_sem):
                 print('NaN in render semantic loss!')
                 loss_render_sem = torch.Tensor([0.0]).to(render_depth.device)
@@ -334,12 +375,6 @@ class GaussianSplattingDecoder(BaseModule):
         intrinsics[..., 0, :] /= self.render_w
         intrinsics[..., 1, :] /= self.render_h
 
-        # transform = torch.Tensor([[0, 1, 0, 0],
-        #                           [1, 0, 0, 0],
-        #                           [0, 0, 1, 0],
-        #                           [0, 0, 0, 1]]).to(device)
-        # extrinsics = transform.unsqueeze(0).unsqueeze(0) @ extrinsics
-        
         density_prob = rearrange(density_prob, 'b dim1 h w d -> (b dim1) (h w d)')
 
         if self.semantic_head:
@@ -373,7 +408,7 @@ class GaussianSplattingDecoder(BaseModule):
         color = rearrange(color, "(b v) c h w -> b v c h w", b=b, v=v)
         depth = rearrange(depth, "(b v) c h w -> b v c h w", b=b, v=v).squeeze(2)
 
-        return depth, color, feats
+        return depth, color, feats, gaussians
     
 
     def visualize_gaussian(self,
@@ -597,3 +632,109 @@ class GaussianSplattingDecoder(BaseModule):
         )
 
         return color, depth.squeeze(1)
+    
+    def calculate_3dgs_loss(self, 
+                            render_depth, depth_gt, depth_masks, 
+                            semantic_pred, semantic_gt,
+                            rgb_pred, render_img_gt):
+        gs_loss, gs_depth, gs_sem, gs_img = [0.] * 4
+        gs_depth = self.compute_depth_loss(render_depth, depth_gt, depth_masks)
+        gs_mask = torch.ones_like(depth_masks).bool()
+        if self.gs_mask == 'ego':
+            msk_h = int(0.28 * depth_gt.shape[2])
+            gs_mask[:, 0, -1 * msk_h:, :] = False
+        elif self.gs_mask == 'depth':
+            gs_mask = (depth_masks > 0)
+            msk_h = int(0.28 * depth_gt.shape[2])
+            gs_mask[:, 0, -1 * msk_h:, :] = False
+        elif self.gs_mask == 'sky':
+            gs_mask = (semantic_gt != 5)
+            msk_h = int(0.28 * depth_gt.shape[2])
+            gs_mask[:, 0, -1 * msk_h:, :] = False
+
+        if torch.isnan(gs_depth):
+            print('gs depth loss is nan!')
+            gs_depth = torch.Tensor([0.]).cuda()
+        gs_loss += gs_depth * self.loss_weight[0]
+
+        if self.semantic_head:
+            semantic_pred = semantic_pred[:, :semantic_gt.shape[1], :, :, :]
+            if self.gs_mask is not None:
+                gs_sem = self.compute_semantic_loss_flatten(
+                    semantic_pred.permute(0, 1, 3, 4 ,2)[gs_mask], 
+                    semantic_gt[gs_mask])
+            else:
+                gs_sem = self.compute_semantic_loss(semantic_pred, semantic_gt)
+
+            if torch.isnan(gs_sem):
+                print('gs semantic loss is nan!')
+                gs_sem = torch.Tensor([0.]).cuda()
+            gs_loss += gs_sem * self.loss_weight[1]
+
+        if self.img_recon_head:
+            if self.gs_mask is not None:
+                gs_mask_img = gs_mask.unsqueeze(2).repeat(1, 1, 3, 1, 1)
+                gs_img = self.compute_image_loss(
+                    rgb_pred[gs_mask_img], render_img_gt[gs_mask_img])
+            else:
+                gs_img = self.compute_image_loss(rgb_pred, render_img_gt)
+
+            if torch.isnan(gs_img):
+                print('gs image loss is nan!')
+                gs_img = torch.Tensor([0.]).cuda()
+            gs_loss += gs_img * self.loss_weight[2]
+            
+        if self.overfit:
+            print('gs_depth: {:4f}, gs_sem: {:4f}, gs_img: {:4f}'.format(
+                gs_depth, gs_sem, gs_img))
+        return gs_loss
+    
+    def compute_depth_loss(self, depth_est, depth_gt, mask):
+        '''
+        Args:
+            mask: depth_gt > 0
+        '''
+        if self.depth_loss_type == 'silog':
+            variance_focus = 0.85
+            d = torch.log(depth_est[mask]) - torch.log(depth_gt[mask])
+            loss = torch.sqrt((d ** 2).mean() - variance_focus * (d.mean() ** 2))
+        elif self.depth_loss_type == 'l1':
+            loss = F.l1_loss(depth_est[mask], depth_gt[mask], size_average=True)
+        elif self.depth_loss_type == 'rl1':
+            depth_est = (1 / depth_est) * self.max_depth
+            depth_gt = (1 / depth_gt) * self.max_depth
+            loss = F.l1_loss(depth_est[mask], depth_gt[mask], size_average=True)
+        elif self.depth_loss_type == 'sml1':
+            loss = F.smooth_l1_loss(depth_est[mask], depth_gt[mask], size_average=True)
+        else:
+            raise NotImplementedError()
+
+        return loss
+    
+    def compute_semantic_loss_flatten(self, sem_est, sem_gt):
+        '''
+        Args:
+            sem_est: N, C
+            sem_gt: N
+        '''
+        if self.contrastive:
+            sem_est = torch_scatter.scatter_mean(sem_est, sem_gt, 0)
+            sem_gt = torch_scatter.scatter_mean(sem_gt, sem_gt, 0)
+            loss = F.cross_entropy(sem_est, sem_gt.long())
+        else:
+            loss = F.cross_entropy(sem_est, sem_gt.long(), ignore_index=-100)
+
+        return loss
+
+    def compute_semantic_loss(self, sem_est, sem_gt, ignore_index=-100):
+        '''
+        Args:
+            sem_est: B, N, C, H, W, predicted unnormalized logits
+            sem_gt: B, N, H, W
+        '''
+        B, N, C, H, W = sem_est.shape
+        sem_est = sem_est.view(B * N, -1, H, W)
+        sem_gt = sem_gt.view(B * N, H, W)
+        loss = F.cross_entropy(sem_est, sem_gt.long(), ignore_index=ignore_index)
+
+        return loss

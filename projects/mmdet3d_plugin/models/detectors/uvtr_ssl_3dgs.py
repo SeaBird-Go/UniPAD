@@ -82,7 +82,7 @@ class UVTRSSL3DGS(UVTRSSL):
             img_metas, img_depth, 
             img, **kwargs
         )
-        losses = self.pts_bbox_head.loss(out_dict, img_metas)
+        losses = self.pts_bbox_head.loss(out_dict, dict(**kwargs))
         if self.with_depth_head and hasattr(self.pts_bbox_head.view_trans, "loss"):
             losses.update(
                 self.pts_bbox_head.view_trans.loss(img_depth, points, img, img_metas)

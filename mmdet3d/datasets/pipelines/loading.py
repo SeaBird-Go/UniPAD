@@ -2,6 +2,7 @@
 import mmcv
 import numpy as np
 import os
+import torch
 
 from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.builder import PIPELINES
@@ -690,4 +691,112 @@ class LoadOcc3DGTFromFile(object):
         results['mask_lidar'] = mask_lidar
         results['mask_camera'] = mask_camera
 
+        return results
+
+
+@PIPELINES.register_module()
+class PointToMultiViewDepth(object):
+    def __init__(self, 
+                 depth_scale=(1.0, 50.0), 
+                 downsample=1, 
+                 render_scale=(1, 1), 
+                 render_size=(224, 352)):
+        self.downsample = downsample
+        self.depth_scale = depth_scale
+        self.render_scale = render_scale
+        self.render_size = render_size
+
+    def __call__(self, results):
+        points_lidar = results['points']
+        img_ori_shape = results['ori_shape']
+
+        lidarseg = None
+        if 'lidarseg' in results.keys() and \
+            not isinstance(results['lidarseg'], str):
+            lidarseg = results['lidarseg']
+            
+            pts_semantic_mask = results.get('pts_semantic_mask', None)
+            if pts_semantic_mask is not None:
+                lidarseg = lidarseg[pts_semantic_mask]
+
+        depth_map_list = []
+        semantic_map_list = []
+
+        for cid in range(len(results['img_filename'])):
+            lidar2img = torch.from_numpy(results['lidar2img'][cid][0]).float()  # (4, 4)
+            _img_ori_shape = img_ori_shape[cid]
+            
+            points_img = points_lidar.tensor[:, :3].matmul(
+                lidar2img[:3, :3].T) + lidar2img[:3, 3].unsqueeze(0)
+            points_img = torch.cat(
+                [points_img[:, :2] / points_img[:, 2:3], points_img[:, 2:3]],
+                1)
+
+            depth_map_raw, semantic_map = self.points2depth_and_semantic(
+                points_img, _img_ori_shape, 
+                self.render_size[0], self.render_size[1], lidarseg
+            )
+            
+            depth_map_list.append(depth_map_raw)
+            semantic_map_list.append(semantic_map)
+            # intricics_list.append(cam2img)
+            # pose_spatial_list.append(cam2camego)
+
+        results['render_gt_depth'] = torch.stack(depth_map_list)
+        results['render_gt_semantic'] = torch.stack(semantic_map_list)
+        return results
+    
+    def points2depth_and_semantic(self, points, img_shape, height, width, semantic=None):
+        rH, rW = img_shape[0], img_shape[1]
+        height, width = height, width
+        depth_map = torch.zeros((height, width), dtype=torch.float32)
+        semantic_map = torch.ones((height, width), dtype=torch.long) * 255
+        coor = torch.round(points[:, :2] / torch.Tensor([rW/width, rH/height]))
+        depth = points[:, 2]
+        kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & (
+                 coor[:, 1] >= 0) & (coor[:, 1] < height) & (
+                 depth < self.depth_scale[1]) & (
+                 depth >= self.depth_scale[0])
+        if semantic is None or type(semantic) == str:
+            semantic = depth
+        coor, depth, semantic = coor[kept1], depth[kept1], semantic[kept1]
+        ranks = coor[:, 0] + coor[:, 1] * width
+        sort = (ranks + depth / 100.).argsort()
+        coor, depth, ranks, semantic = coor[sort], depth[sort], ranks[sort], semantic[sort]
+
+        kept2 = torch.ones(coor.shape[0], device=coor.device, dtype=torch.bool)
+        kept2[1:] = (ranks[1:] != ranks[:-1])
+        coor, depth, semantic = coor[kept2], depth[kept2], semantic[kept2]
+        coor = coor.to(torch.long)
+        depth_map[coor[:, 1], coor[:, 0]] = depth
+        semantic_map[coor[:, 1], coor[:, 0]] = semantic.long()
+        return depth_map, semantic_map
+    
+
+@PIPELINES.register_module()
+class LoadLiDARSegGTFromFile(object):
+    """Load LiDAR point cloud segmentation ground truths from files.
+    Add the key 'lidarseg' to the results dict.
+    """
+
+    def __call__(self, results):
+        assert 'lidarseg' in results, \
+            'lidarseg path should be in results'
+        
+        lidarseg_path = results['lidarseg']
+        lidarseg = np.fromfile(lidarseg_path, dtype=np.uint8)
+        learning_map = {
+            1: 0, 5: 0, 7: 0, 8: 0, 10: 0, 11: 0, 13: 0, 
+            19: 0, 20: 0, 0: 0, 29: 0, 31: 0, 9: 1, 14: 2, 15: 3, 16: 3,
+            17: 4, 18: 5, 21: 6, 2: 7, 3: 7, 4: 7, 6: 7, 
+            12: 8, 22: 9, 23: 10, 24: 11, 25: 12, 26: 13, 27: 14, 28: 15,
+            30: 16
+        }
+        lidarseg = np.vectorize(learning_map.__getitem__)(lidarseg)
+        results['lidarseg'] = torch.Tensor(lidarseg).long()
+        
+        # Add a mask for each point to indicate whether it is valid, it will be
+        # used in PointsRangeFilter
+        pts_semantic_mask = torch.arange(len(lidarseg))
+        results['pts_semantic_mask'] = pts_semantic_mask
         return results

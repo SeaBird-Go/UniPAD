@@ -28,6 +28,8 @@ unified_voxel_shape = [
     int((point_cloud_range[5] - point_cloud_range[2]) / unified_voxel_size[2]),
 ]
 
+render_size = [90, 160]
+
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True
 )
@@ -85,10 +87,12 @@ model = dict(
         type="PretrainHead",
         in_channels=128,
         use_semantic=True,
+        render_scale=[render_size[0] / 900, 
+                      render_size[1] / 1600],
         render_head_cfg=dict(
             type="GaussianSplattingDecoder",
             semantic_head=True,
-            render_size=[90, 160],
+            render_size=render_size,
             depth_range=[0.1, 64],
             pc_range=point_cloud_range,
             voxels_size=unified_voxel_shape,
@@ -135,12 +139,19 @@ train_pipeline = [
         to_float32=True,
         file_client_args=file_client_args,
     ),
+    dict(type='LoadLiDARSegGTFromFile'),
     dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
     dict(type="PointShuffle"),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
+    dict(type="PointToMultiViewDepth",
+         render_scale=[render_size[0] / 900, 
+                      render_size[1] / 1600],
+         render_size=render_size),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
-    dict(type="CollectUnified3D", keys=["points", "img"]),
+    dict(type="CollectUnified3D", keys=["points", "img",
+                                        "render_gt_depth", 
+                                        "render_gt_semantic"]),
 ]
 test_pipeline = [
     dict(
@@ -170,7 +181,7 @@ data = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root
-        + "nuscenes_unified_infos_train.pkl",  # please change to your own info file
+        + "nuscenes_unified_infos_train_v2.pkl",  # please change to your own info file
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -185,7 +196,7 @@ data = dict(
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
-        ann_file=data_root + "nuscenes_unified_infos_val.pkl",
+        ann_file=data_root + "nuscenes_unified_infos_val_v2.pkl",
         load_interval=1,
     ),  # please change to your own info file
     test=dict(
@@ -193,7 +204,7 @@ data = dict(
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
-        ann_file=data_root + "nuscenes_unified_infos_val.pkl",
+        ann_file=data_root + "nuscenes_unified_infos_val_v2.pkl",
         load_interval=1,
     ),
 )  # please change to your own info file

@@ -5,7 +5,8 @@ from .formating import Collect3D, DefaultFormatBundle, DefaultFormatBundle3D
 from .loading import (LoadAnnotations3D, LoadImageFromFileMono3D,
                       LoadMultiViewImageFromFiles, LoadPointsFromFile,
                       LoadPointsFromMultiSweeps, NormalizePointsColor,
-                      PointSegClassMapping, LoadOcc3DGTFromFile)
+                      PointSegClassMapping, LoadOcc3DGTFromFile,
+                      PointToMultiViewDepth)
 from .test_time_aug import MultiScaleFlipAug3D
 from .transforms_3d import (BackgroundPointsFilter, GlobalAlignment,
                             GlobalRotScaleTrans, IndoorPatchPointSample,
@@ -25,5 +26,5 @@ __all__ = [
     'LoadPointsFromMultiSweeps', 'BackgroundPointsFilter',
     'VoxelBasedPointSampler', 'GlobalAlignment', 'IndoorPatchPointSample',
     'LoadImageFromFileMono3D', 'ObjectNameFilter', 'RandomDropPointsColor',
-    'RandomJitterPoints', 'LoadOcc3DGTFromFile'
+    'RandomJitterPoints', 'LoadOcc3DGTFromFile', 'PointToMultiViewDepth'
 ]

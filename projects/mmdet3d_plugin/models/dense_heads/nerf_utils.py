@@ -47,11 +47,11 @@ def visualize_depth(depth,
 def visualize_image_semantic_depth_pair(images, 
                                         semantic, 
                                         depth, 
-                                        save=False,
+                                        cam_order=[2,0,1,4,3,5],
                                         save_dir=None,
                                         enable_save_sperate=False):
         '''
-        Visualize the camera image, semantic map and depth map.
+        Visualize the camera image, semantic map and dense depth map.
         Args:
             images: num_camera, 3, H, W
             semantic: num_camera, H, W, 3
@@ -61,6 +61,11 @@ def visualize_image_semantic_depth_pair(images,
 
         concated_render_list = []
         concated_image_list = []
+
+        # reorder the camera order
+        images = images[cam_order]
+        semantic = semantic[cam_order]
+        depth = depth[cam_order]
         
         ## check if is Tensor, if not, convert to Tensor
         if torch.is_tensor(semantic):
