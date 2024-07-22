@@ -1,7 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from projects.mmdet3d_plugin.ops import SmoothSampler, grid_sample_3d
+from projects.mmdet3d_plugin.ops import grid_sample_3d
+from smooth_sampler import SmoothSampler
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.runner.base_module import BaseModule
 

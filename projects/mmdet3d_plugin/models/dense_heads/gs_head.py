@@ -38,6 +38,7 @@ class GaussianSplattingDecoder(BaseModule):
                  semantic_head=False,
                  render_size=None,
                  depth_range=None,
+                 depth_loss_type='l1',
                  pc_range=None,
                  voxels_size=None,
                  step_size=1,
@@ -59,7 +60,7 @@ class GaussianSplattingDecoder(BaseModule):
 
         self.gs_mask = 'depth'
 
-        self.depth_loss_type = 'silog'
+        self.depth_loss_type = depth_loss_type
 
         self.loss_weight = [1.0, 1.0, 1.0]
 
@@ -161,14 +162,13 @@ class GaussianSplattingDecoder(BaseModule):
         """Foward function
 
         Args:
-            density_prob (Tensor): (bs, 1, 200, 200, 16)
-            rgb_recon (Tensor): (bs, 3, 200, 200, 16)
-            occ_semantic (Tensor): (bs, c, 200, 200, 16)
-            intricics (Tensor): (bs, num_view, 4, 4)
-            pose_spatial (Tensor): (bs, num_view, 4, 4)
-            volume_feat (Tensor): (bs, 200, 200, 16, c)
+            inputs: (dict), including density_prob (Tensor): (bs, 1, 200, 200, 16)
+                rgb_recon (Tensor): (bs, 3, 200, 200, 16)
+                occ_semantic (Tensor): (bs, c, 200, 200, 16)
+                intricics (Tensor): (bs, num_view, 4, 4)
+                pose_spatial (Tensor): (bs, num_view, 4, 4)
+                volume_feat (Tensor): (bs, 200, 200, 16, c)
             render_mask (_type_, optional): _description_. Defaults to None.
-            vis_semantic (bool, optional): Use for visualization debug. Defaults to False.
 
         Returns:
             Tuple: rendered depth, rgb images and semantic features
@@ -204,33 +204,6 @@ class GaussianSplattingDecoder(BaseModule):
         )
         render_depth = render_depth.clamp(self.min_depth, self.max_depth)
 
-        ## compute the loss
-        # if not return_loss:
-        #     return render_depth, render_rgb, render_semantic
-        
-        # gs_loss = self.calculate_3dgs_loss(
-        #     render_depth, depths, depth_masks,
-        #     semantic_pred, semantic_gt,
-        #     rgb_pred, render_img_gt
-        # )
-
-        # if self.use_ssim_loss:
-        #     gs_photometric_loss = self.photometric_consistency_loss(intrinsic, pose_spatial, render_depth, render_img_gt)
-        #     gs_loss += gs_photometric_loss
-
-        # gs_loss += calculate_total_variation_loss(
-        #     occupancy, semantic, self.tv_occ_loss_weight, self.tv_sem_loss_weight, self.tv_mask_road
-        # )
-
-        # if self.sigma_loss_weight > 0 or self.sdf_estimation_loss_weight > 0:
-        #     sigma_loss, sdf_estimation_loss = self.gaussian_sigma_sdf_loss(
-        #         gaussians,
-        #         intrinsic,
-        #         pose_spatial,
-        #         depths
-        #     )
-        #     gs_loss += sigma_loss
-        #     gs_loss += sdf_estimation_loss
         dec_output = {'render_depth': render_depth,
                       'render_rgb': render_rgb,
                       'render_semantic': render_semantic}
@@ -379,10 +352,15 @@ class GaussianSplattingDecoder(BaseModule):
 
         if self.semantic_head:
             semantic_pred = rearrange(semantic_pred, 'b c h w d -> b (h w d) c')
+            _feats3D = repeat(semantic_pred, "b g c -> (b v) g c", v=v)
+        else:
+            _feats3D = None
 
         gaussians = self.predict_gaussian(density_prob,
                                           extrinsics,
                                           volume_feat)
+        
+        # start rendering
         render_results = render_cuda(
             rearrange(extrinsics, "b v i j -> (b v) i j"),
             rearrange(intrinsics, "b v i j -> (b v) i j"),
@@ -396,7 +374,7 @@ class GaussianSplattingDecoder(BaseModule):
             repeat(gaussians.opacities, "b g -> (b v) g", v=v),
             scale_invariant=False,
             use_sh=True,
-            feats3D=repeat(semantic_pred, "b g c -> (b v) g c", v=v)
+            feats3D=_feats3D
         )
         if self.semantic_head:
             color, depth, feats = render_results
@@ -429,12 +407,6 @@ class GaussianSplattingDecoder(BaseModule):
         intrinsics[..., 0, :] /= self.render_w
         intrinsics[..., 1, :] /= self.render_h
 
-        # transform = torch.Tensor([[0, 1, 0, 0],
-        #                           [1, 0, 0, 0],
-        #                           [0, 0, 1, 0],
-        #                           [0, 0, 0, 1]]).to(device)
-        # extrinsics = transform.unsqueeze(0).unsqueeze(0) @ extrinsics
-        
         bs = density_prob.shape[0]
         xyzs = repeat(self.volume_xyz, 'h w d dim3 -> bs h w d dim3', bs=bs).to(device)
         xyzs = rearrange(xyzs, 'b h w d dim3 -> b (h w d) dim3') # (bs, num, 3)
@@ -493,7 +465,16 @@ class GaussianSplattingDecoder(BaseModule):
                          density_prob,
                          extrinsics,
                          volume_feat):
-        
+        """Learn the 3D Gaussian parameters from the volume feature
+
+        Args:
+            density_prob (Tesnro): (bs, g, 1)
+            extrinsics (Tensor): (bs, v, 4, 4)
+            volume_feat (Tensor): (bs, h, w, d, c)
+
+        Returns:
+            class: Gaussians class containing the Gaussian parameters
+        """
         bs, v = extrinsics.shape[:2]
         device = extrinsics.device
 
@@ -699,7 +680,7 @@ class GaussianSplattingDecoder(BaseModule):
             d = torch.log(depth_est[mask]) - torch.log(depth_gt[mask])
             loss = torch.sqrt((d ** 2).mean() - variance_focus * (d.mean() ** 2))
         elif self.depth_loss_type == 'l1':
-            loss = F.l1_loss(depth_est[mask], depth_gt[mask], size_average=True)
+            loss = F.l1_loss(depth_est[mask], depth_gt[mask])
         elif self.depth_loss_type == 'rl1':
             depth_est = (1 / depth_est) * self.max_depth
             depth_gt = (1 / depth_gt) * self.max_depth

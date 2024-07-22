@@ -18,7 +18,8 @@ from mmcv.runner import force_fp32, auto_fp16
 from mmdet.models import HEADS
 from mmdet3d.models import builder
 
-from .nerf_utils import visualize_image_semantic_depth_pair
+from .nerf_utils import (visualize_image_semantic_depth_pair, 
+                         visualize_image_pairs)
 from .. import utils
 
 
@@ -59,6 +60,7 @@ class PretrainHead(BaseModule):
         use_semantic=False,
         semantic_class=17,
         vis_gt=False,
+        vis_pred=False,
         **kwargs
     ):
         super().__init__()
@@ -67,6 +69,7 @@ class PretrainHead(BaseModule):
 
         self.use_semantic = use_semantic
         self.vis_gt = vis_gt
+        self.vis_pred = vis_pred
 
         if view_cfg is not None:
             vtrans_type = view_cfg.pop('type', 'Uni3DViewTrans')
@@ -125,7 +128,7 @@ class PretrainHead(BaseModule):
         lidar2cam = np.asarray(lidar2cam)  # (bs, 6, 1, 4, 4)
         intrinsics = np.asarray(intrinsics)
 
-        ref_tensor = img_feats[0]
+        ref_tensor = img_feats[0].float()
 
         intrinsics = ref_tensor.new_tensor(intrinsics)
         pose_spatial = torch.inverse(
@@ -190,6 +193,27 @@ class PretrainHead(BaseModule):
 
         ## 2. Start rendering, including neural rendering or 3DGS
         render_results = self.render_head(output)
+
+        ## Visualize the results
+        if self.vis_pred:
+            render_depth = render_results['render_depth']
+            rgb_pred = render_results['render_rgb'] * 255.0
+            semantic_pred = render_results['render_semantic']
+
+            render_gt_semantic = kwargs.get('render_gt_semantic', None)
+            render_gt_depth = kwargs.get('render_gt_depth', None)
+
+            semantic = semantic_pred.argmax(2)
+            semantic = OCC3D_PALETTE[semantic].to(semantic_pred)
+            visualize_image_pairs(
+                img_inputs[0],
+                semantic[0], # rgb_pred[0].permute(0, 2, 3, 1),
+                render_depth[0],
+                semantic_is_sparse=False,
+                depth_is_sparse=False,
+                save_dir="results/vis/3dgs_overfitting"
+            )
+            exit()
         return render_results
     
     def loss(self, preds_dict, targets):
@@ -197,7 +221,7 @@ class PretrainHead(BaseModule):
         return loss_dict
     
     def prepare_gt_data(self, **kwargs):
-        # (b, 200, 200, 16)
+        # Prepare the ground truth volume data for visualization
         voxel_semantics = kwargs['voxel_semantics']
         density_prob = rearrange(voxel_semantics, 'b x y z -> b () x y z')
         density_prob = density_prob != 17

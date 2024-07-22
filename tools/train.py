@@ -159,6 +159,7 @@ def main():
                 dash_line)
     meta['env_info'] = env_info
     meta['config'] = cfg.pretty_text
+    cfg.device = "cuda"
 
     # log some basic info
     logger.info(f'Distributed training: {distributed}')

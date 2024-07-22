@@ -244,7 +244,7 @@ class UVTRSSL(MVXTwoStageDetector):
             img_metas = [img_metas]
         if not isinstance(img, list):
             img = [img]
-        results = self.simple_test(img_metas[0], points, img[0])
+        results = self.simple_test(img_metas[0], points, img[0], **kwargs)
 
         return results
 

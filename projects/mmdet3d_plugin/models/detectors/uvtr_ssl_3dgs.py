@@ -89,3 +89,15 @@ class UVTRSSL3DGS(UVTRSSL):
             )
         return losses
 
+    def simple_test(self, img_metas, points=None, img=None, **kwargs):
+        """Test function without augmentaiton."""
+        pts_feat, img_feats, img_depth = self.extract_feat(
+            points=points, img=img, img_metas=img_metas
+        )
+        self.pts_bbox_head.vis_pred = True
+        results = self.pts_bbox_head(
+            pts_feat, img_feats, img_metas, 
+            img_depth, img, **kwargs
+        )
+        set_trace()
+        return results

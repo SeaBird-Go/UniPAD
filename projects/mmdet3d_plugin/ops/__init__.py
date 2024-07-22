@@ -1,9 +1,9 @@
 import torch
-from .smooth_sampler import SmoothSampler
+# from .smooth_sampler import SmoothSampler
 from .voxel_pool import voxel_pool
 from .point_ops import group_inner_inds
 
-__all__ = ['SmoothSampler', 'voxel_pool', 'group_inner_inds']
+__all__ = ['voxel_pool', 'group_inner_inds']
 
 
 def grid_sample_3d(feature, grid):

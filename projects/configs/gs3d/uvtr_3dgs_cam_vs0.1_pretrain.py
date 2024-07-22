@@ -97,8 +97,10 @@ model = dict(
             pc_range=point_cloud_range,
             voxels_size=unified_voxel_shape,
             volume_size=unified_voxel_shape,
-            gs_scale_min=0.1,
-            gs_scale_max=0.3,
+            learn_gs_scale_rot=True,
+            gs_scale=0.6,
+            gs_scale_min=0.2,
+            gs_scale_max=0.7,
         ),
         view_cfg=dict(
             type="Uni3DViewTrans",
@@ -167,11 +169,18 @@ test_pipeline = [
         to_float32=True,
         file_client_args=file_client_args,
     ),
+    dict(type='LoadLiDARSegGTFromFile'),
     dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
+    dict(type="PointToMultiViewDepth",
+         render_scale=[render_size[0] / 900, 
+                      render_size[1] / 1600],
+         render_size=render_size),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
-    dict(type="CollectUnified3D", keys=["points", "img"]),
+    dict(type="CollectUnified3D", keys=["points", "img",
+                                        "render_gt_depth", 
+                                        "render_gt_semantic"]),
 ]
 
 data = dict(
@@ -189,7 +198,7 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d="LiDAR",
-        load_interval=1,
+        load_interval=2,
     ),
     val=dict(
         type=dataset_type,
@@ -204,7 +213,7 @@ data = dict(
         pipeline=test_pipeline,
         classes=class_names,
         modality=input_modality,
-        ann_file=data_root + "nuscenes_unified_infos_val_v2.pkl",
+        ann_file=data_root + "nuscenes_unified_infos_train_v2.pkl",
         load_interval=1,
     ),
 )  # please change to your own info file
@@ -230,7 +239,7 @@ lr_config = dict(
 )
 total_epochs = 12
 evaluation = dict(interval=4, pipeline=test_pipeline)
-checkpoint_config = dict(max_keep_ckpts=1, interval=1)
+checkpoint_config = dict(max_keep_ckpts=3, interval=1)
 log_config = dict(
     interval=50, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
 )
