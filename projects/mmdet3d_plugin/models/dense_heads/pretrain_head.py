@@ -196,6 +196,13 @@ class PretrainHead(BaseModule):
 
         ## Visualize the results
         if self.vis_pred:
+            save_dir = "results/vis/3dgs_overfitting_gs_min_0.2_max_0.7"
+            os.makedirs(save_dir, exist_ok=True)
+
+            ## save the occupancy offline for visualization
+            torch.save(semantic_output.detach().cpu(), f'{save_dir}/semantic_pred.pth')
+            torch.save(occupancy_output.detach().cpu(), f'{save_dir}/occupancy_pred.pth')
+
             render_depth = render_results['render_depth']
             rgb_pred = render_results['render_rgb'] * 255.0
             semantic_pred = render_results['render_semantic']
@@ -211,7 +218,7 @@ class PretrainHead(BaseModule):
                 render_depth[0],
                 semantic_is_sparse=False,
                 depth_is_sparse=False,
-                save_dir="results/vis/3dgs_overfitting"
+                save_dir=save_dir
             )
             exit()
         return render_results
