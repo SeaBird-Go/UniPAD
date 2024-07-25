@@ -200,7 +200,7 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d="LiDAR",
-        load_interval=1,
+        load_interval=2,
     ),
     val=dict(
         type=dataset_type,
@@ -235,11 +235,11 @@ optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy="CosineAnnealing",
     warmup="linear",
-    warmup_iters=2,
+    warmup_iters=500,
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3,
 )
-total_epochs = 6
+total_epochs = 12
 evaluation = dict(interval=4, pipeline=test_pipeline)
 checkpoint_config = dict(max_keep_ckpts=3, interval=1)
 log_config = dict(

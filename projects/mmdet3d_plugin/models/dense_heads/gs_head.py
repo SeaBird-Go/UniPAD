@@ -21,6 +21,7 @@ from mmcv.runner.base_module import BaseModule
 from .common.gaussians import build_covariance
 from .common.cuda_splatting import render_cuda, render_depth_cuda, render_depth_cuda2
 from .common.sh_rotation import rotate_sh
+from .gs_utils import get_rays_of_a_view
 
 
 class Gaussians:
@@ -51,6 +52,7 @@ class GaussianSplattingDecoder(BaseModule):
                  num_surfaces=1,
                  offset_scale=0.05,
                  gs_scale=0.05,
+                 rescale_z_axis=False,
                  vis_gt=False,
                  **kwargs):
         super().__init__()
@@ -71,6 +73,7 @@ class GaussianSplattingDecoder(BaseModule):
         self.learn_gs_scale_rot = learn_gs_scale_rot
         self.offset_scale = offset_scale
         self.gs_scale = gs_scale
+        self.rescale_z_axis = rescale_z_axis
 
         self.voxels_size = voxels_size
         self.stepsize = step_size
@@ -327,6 +330,7 @@ class GaussianSplattingDecoder(BaseModule):
                 loss_render_sem = torch.Tensor([0.0]).to(render_depth.device)
             losses['loss_render_sem'] = loss_render_sem
 
+        ## Compute the sigma loss and sdf loss, TODO
         return losses
 
     def train_gaussian_rasterization_v2(self, 
@@ -507,6 +511,9 @@ class GaussianSplattingDecoder(BaseModule):
             scales = scales.repeat(bs, xyzs.shape[1], 1)
             rotations = rotations.repeat(bs, xyzs.shape[1], 1)
 
+        if self.rescale_z_axis:
+            scales = scales * torch.tensor([1, 1, 2]).to(device)
+            
         # Create world-space covariance matrices.
         covariances = build_covariance(scales, rotations)
         covariances = rearrange(covariances, "b g i j -> b () g i j")
@@ -691,6 +698,98 @@ class GaussianSplattingDecoder(BaseModule):
             raise NotImplementedError()
 
         return loss
+
+    def gaussian_sigma_sdf_loss(self, 
+                                gaussians, 
+                                intrinsics, 
+                                pose_spatial, 
+                                depths):
+        batch_size, num_camera = intrinsics.shape[:2]
+        intrinsics = intrinsics.view(-1, 4, 4)
+        pose_spatial = pose_spatial.view(-1, 4, 4)
+
+        with torch.no_grad():
+            rays_o, rays_d = get_rays_of_a_view(
+                H=self.render_h,
+                W=self.render_w,
+                K=intrinsics,
+                c2w=pose_spatial,
+                inverse_y=True,
+                flip_x=False,
+                flip_y=False,
+                mode='center'
+            )
+        rays_o = rays_o.view(batch_size, num_camera, self.render_h, self.render_w, 3)
+        rays_d = rays_d.view(batch_size, num_camera, self.render_h, self.render_w, 3)
+        opacities = gaussians.opacities.view(batch_size, 1, *self.voxels_size)
+        sigma_loss = 0
+        sdf_estimation_loss = 0
+
+        for b in range(batch_size):
+            # sample pixels that depth > 0
+            depth = depths[b]
+            rays_o_i = rays_o[b][depth > 0]
+            rays_d_i = rays_d[b][depth > 0]
+            depth = depth[depth > 0]
+
+            # sub-sample valid pixels
+            rand_ind = torch.randperm(rays_o_i.shape[0])
+            sampled_rays_o_i = rays_o_i[rand_ind][:self.max_ray_number]
+            sampled_rays_d_i = rays_d_i[rand_ind][:self.max_ray_number]
+            depth = depth[rand_ind][:self.max_ray_number]
+
+            # calculate points on rays and interpolate gaussian opacities
+            with torch.no_grad():
+                rays_pts, mask_outbbox, interval, rays_pts_depth = \
+                    self.sample_ray(sampled_rays_o_i, sampled_rays_d_i)
+            sdf_estimation = interval - depth.unsqueeze(1)
+            sdf_estimation = sdf_estimation[~mask_outbbox]
+            mask_rays_pts = rays_pts[~mask_outbbox]
+            interpolated_opacity = self.grid_sampler(mask_rays_pts, opacities[b])
+
+            # calculate alpha values like NeRF
+            interval_list = interval[..., 1:] - interval[..., :-1]
+            alpha = torch.zeros_like(rays_pts[..., 0])
+            alpha[~mask_outbbox] =  1 - torch.exp(-interpolated_opacity * interval_list[0, -1])
+            alphainv_cum = torch.cat([torch.ones_like((1 - alpha)[..., [0]]), (1 - alpha).clamp_min(1e-10).cumprod(-1)], -1)
+            weights = alpha * alphainv_cum[..., :-1]
+            interval_list = torch.cat([interval_list, torch.Tensor([0]).to(weights.device).expand(interval_list[..., :1].shape)], -1)
+            interval_list = interval_list * torch.norm(sampled_rays_d_i[..., None, :], dim=-1)
+
+            # calculate sigma loss
+            if self.sigma_loss_weight > 0:
+                l = -torch.log(weights + 1e-5) * torch.exp(-(interval - depth[:, None]) ** 2 / (2 * self.sigma_loss_err)) * interval_list
+                sigma_loss = sigma_loss + torch.mean(torch.sum(l, dim=1)) / batch_size * self.sigma_loss_weight
+
+            # calculate signed distance field
+            if self.beta_mode == 'learnable':
+                beta = torch.exp(self._log_beta).expand(len(interpolated_opacity))
+            else:
+                beta = torch.Tensor([self.gs_scale]).to(interpolated_opacity.device)
+            
+            density_threshold = 1
+            clamped_densities = interpolated_opacity.clamp(min=1e-16)
+
+            # calculate sdf_estimation_loss
+            if self.sdf_estimation_loss_weight > 0:
+                sdf_values = beta * (torch.sqrt(-2. * torch.log(clamped_densities)) - \
+                    np.sqrt(-2. * np.log(min(density_threshold, 1.))))
+                sdf_estimation_loss = sdf_estimation_loss + \
+                    (sdf_values - sdf_estimation.abs()).abs().mean() * self.sdf_estimation_loss_weight
+
+        return sigma_loss, sdf_estimation_loss
+    
+    def sample_ray(self, rays_o, rays_d):
+        '''Sample query points on rays'''
+        rng = self.rng
+        rng = rng.repeat(rays_d.shape[-2], 1)
+        rng += torch.rand_like(rng[:, [0]])
+        Zval = self.stepsize * self.voxel_size * rng
+        rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * Zval[..., None]
+        rays_pts_depth = (rays_o[..., None, :] - rays_pts).norm(dim=-1)
+        mask_outbbox = ((self.xyz_min > rays_pts) | (rays_pts > self.xyz_max)).any(dim=-1)
+
+        return rays_pts, mask_outbbox, Zval, rays_pts_depth
     
     def compute_semantic_loss_flatten(self, sem_est, sem_gt):
         '''

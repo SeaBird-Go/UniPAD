@@ -196,7 +196,9 @@ class PretrainHead(BaseModule):
 
         ## Visualize the results
         if self.vis_pred:
-            save_dir = "results/vis/3dgs_overfitting_gs_min_0.2_max_0.7"
+            from .nerf_utils import VisElement, visualize_elements
+
+            save_dir = "results/vis/3dgs_overfitting_offset_scale_0.5_rescale_z_axis"
             os.makedirs(save_dir, exist_ok=True)
 
             ## save the occupancy offline for visualization
@@ -212,12 +214,34 @@ class PretrainHead(BaseModule):
 
             semantic = semantic_pred.argmax(2)
             semantic = OCC3D_PALETTE[semantic].to(semantic_pred)
-            visualize_image_pairs(
-                img_inputs[0],
-                semantic[0], # rgb_pred[0].permute(0, 2, 3, 1),
-                render_depth[0],
-                semantic_is_sparse=False,
-                depth_is_sparse=False,
+            # visualize_image_pairs(
+            #     img_inputs[0],
+            #     semantic[0], # rgb_pred[0].permute(0, 2, 3, 1),
+            #     render_depth[0],
+            #     semantic_is_sparse=False,
+            #     depth_is_sparse=False,
+            #     save_dir=save_dir
+            # )
+
+            target_size = (semantic.shape[2], semantic.shape[3])  # (H, W)
+            visualize_elements(
+                [
+                    VisElement(
+                        img_inputs[0],
+                        type='rgb'
+                    ),
+                    VisElement(
+                        render_depth[0],
+                        type='depth',
+                        is_sparse=False,
+                    ),
+                    VisElement(
+                        semantic[0],
+                        type='semantic',
+                        is_sparse=False,
+                    ),
+                ],
+                target_size=target_size,
                 save_dir=save_dir
             )
             exit()
