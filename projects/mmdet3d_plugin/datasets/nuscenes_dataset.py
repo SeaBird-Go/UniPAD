@@ -259,6 +259,7 @@ class NuScenesSweepDataset(Custom3DDataset):
             lidar2cam_rts = []
             cam_intrinsics = []
             cam2camego_list = []
+            camego2global_list = []
             for cam_type, cam_info in info["cams"].items():
                 image_paths.append(cam_info["data_path"])
                 # obtain lidar to image transformation matrix
@@ -282,6 +283,13 @@ class NuScenesSweepDataset(Custom3DDataset):
                 cam2camego[:3, 3] = cam_info['sensor2ego_translation']
                 cam2camego_list.append(cam2camego)
 
+                # obtain the ego to global transformation matrix
+                ego2global = np.eye(4, dtype=np.float32)
+                ego2global[:3, :3] = Quaternion(
+                    cam_info['ego2global_rotation']).rotation_matrix
+                ego2global[:3, 3] = cam_info['ego2global_translation']
+                camego2global_list.append(ego2global)
+
             input_dict.update(
                 dict(
                     img_filename=image_paths,
@@ -289,6 +297,7 @@ class NuScenesSweepDataset(Custom3DDataset):
                     lidar2cam=lidar2cam_rts,
                     cam_intrinsic=cam_intrinsics,
                     cam2camego=cam2camego_list,
+                    camego2global=camego2global_list,
                 )
             )
             # use cam sweeps

@@ -3,6 +3,10 @@ import numpy as np
 
 from mmdet.datasets.builder import PIPELINES
 import cv2
+import torch
+from mmcv.image.photometric import imnormalize
+from mmcv.parallel import DataContainer as DC
+from mmdet.datasets.pipelines import to_tensor
 
 
 @PIPELINES.register_module()
@@ -94,6 +98,7 @@ class LoadMultiViewMultiSweepImageFromFiles(object):
         )
         # unravel to list, see `DefaultFormatBundle` in formating.py
         # which will transpose each image separately and then stack into array
+        results["img_ori"] = imgs
         results["img"] = sweeps_imgs
         results["img_shape"] = [img.shape for img in sweeps_imgs]
         results["ori_shape"] = [img.shape for img in sweeps_imgs]
@@ -151,3 +156,74 @@ class LoadMultiViewMultiSweepImageFromFiles(object):
         repr_str += f"(to_float32={self.to_float32}, "
         repr_str += f"color_type='{self.color_type}')"
         return repr_str
+
+
+@PIPELINES.register_module()
+class PrepapreImageInputs(LoadMultiViewMultiSweepImageFromFiles):
+    """Prepare the original mage inputs for the SSL.
+    """
+    def __init__(self, 
+                 input_size, 
+                 norm_cfg=None,
+                 **kwargs):
+        super().__init__(**kwargs)
+
+        self.input_size = input_size  # (h, w)
+        if norm_cfg is not None:
+            self.mean = norm_cfg['mean']
+            self.std = norm_cfg['std']
+        else:
+            self.mean = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            self.std = np.array([255.0, 255.0, 255.0], dtype=np.float32)
+
+    def transform_core(self, 
+                       img, 
+                       img_size, # (h, w)
+                       to_rgb=True):
+        img = cv2.resize(img, img_size[::-1])
+        img = imnormalize(np.array(img), self.mean, self.std, to_rgb)
+        return img
+
+    def __call__(self, results):
+        assert 'adjacent' in results, \
+            'adjacent should be in results'
+        
+        source_imgs_list = []
+        for adj_info in results['adjacent']:
+            cam_infos = adj_info["cams"]
+            img_filename = [cam_info['data_path'] for cam_info in cam_infos.values()]
+            img_adj = [self._load_image(name) for name in img_filename]
+
+            # resize and normalize
+            imgs = [
+                self.transform_core(img, self.input_size)
+                for img in img_adj
+            ]
+            imgs = [img.transpose(2, 0, 1) for img in imgs]
+            source_imgs_list.append(np.ascontiguousarray(np.stack(imgs, axis=0)))
+
+        results['source_imgs'] = DC(to_tensor(np.stack(source_imgs_list, axis=0)), stack=True)
+        
+        img_ori = results['img_ori']
+        ## resize the image
+        imgs = [
+            self.transform_core(img, self.input_size)
+            for img in img_ori
+        ]
+
+        # process multiple imgs in single frame
+        imgs = [img.transpose(2, 0, 1) for img in imgs]
+        imgs = np.ascontiguousarray(np.stack(imgs, axis=0))
+        results['target_imgs'] = DC(to_tensor(imgs), stack=True)
+
+        ## process the intrinsic matrix
+        assert 'K' in results, 'K should be in results'
+
+        ori_shape = results['ori_shape'][0]
+        origin_h, origin_w = ori_shape[0], ori_shape[1]
+        h, w = self.input_size[0], self.input_size[1]
+        results['K'][:, :, 0] *= w / origin_w
+        results['K'][:, :, 1] *= h / origin_h
+        results['inv_K'] = torch.pinverse(results['K'])
+
+        return results

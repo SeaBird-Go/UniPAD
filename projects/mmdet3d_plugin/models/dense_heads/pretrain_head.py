@@ -12,6 +12,7 @@ import numpy as np
 from einops import rearrange
 import torch
 from torch import nn
+import random
 import torch.nn.functional as F
 from mmcv.runner.base_module import BaseModule
 from mmcv.runner import force_fp32, auto_fp16
@@ -21,6 +22,7 @@ from mmdet3d.models import builder
 from .nerf_utils import (visualize_image_semantic_depth_pair, 
                          visualize_image_pairs)
 from .. import utils
+from .depth_ssl import *
 
 
 OCC3D_PALETTE = torch.Tensor([
@@ -61,6 +63,11 @@ class PretrainHead(BaseModule):
         semantic_class=17,
         vis_gt=False,
         vis_pred=False,
+        use_depth_consistency=False,
+        render_view_indices=list(range(6)),
+        depth_ssl_size=None,
+        depth_loss_weight=1.0,
+        opt=None,
         **kwargs
     ):
         super().__init__()
@@ -70,6 +77,22 @@ class PretrainHead(BaseModule):
         self.use_semantic = use_semantic
         self.vis_gt = vis_gt
         self.vis_pred = vis_pred
+
+        ## use the depth self-supervised consistency loss
+        self.use_depth_consistency = use_depth_consistency
+        self.render_view_indices = render_view_indices
+        self.depth_ssl_size = depth_ssl_size
+        self.opt = opt  # options for the depth consistency loss
+        self.depth_loss_weight = depth_loss_weight
+
+        if self.use_depth_consistency:
+            h = depth_ssl_size[0]
+            w = depth_ssl_size[1]
+            num_cam = len(self.render_view_indices)
+            self.backproject_depth = BackprojectDepth(num_cam, h, w)
+            self.project_3d = Project3D(num_cam, h, w)
+
+            self.ssim = SSIM()
 
         if view_cfg is not None:
             vtrans_type = view_cfg.pop('type', 'Uni3DViewTrans')
@@ -248,8 +271,139 @@ class PretrainHead(BaseModule):
         return render_results
     
     def loss(self, preds_dict, targets):
-        loss_dict = self.render_head.loss(preds_dict, targets)
+        if self.use_depth_consistency:
+            ## 1) Compute the reprojected rgb images based on the rendered depth
+            self.generate_image_pred(targets, preds_dict)
+
+            ## 2) Compute the depth consistency loss
+            loss_dict = self.compute_self_supervised_losses(targets, preds_dict)
+        else:
+            loss_dict = self.render_head.loss(preds_dict, targets)
         return loss_dict
+
+    def compute_self_supervised_losses(self, inputs, outputs):
+        """Compute the reprojection and smoothness losses for a minibatch
+        """
+        losses = {}
+        total_loss = 0
+
+        loss = 0
+
+        depth = outputs["render_depth"]  # (M, 1, h, w)
+        disp = 1.0 / (depth + 1e-7)
+        color = outputs["target_imgs"]
+        target = outputs["target_imgs"]
+
+        reprojection_losses = []
+        for frame_id in range(len(outputs['color_reprojection'])):
+            pred = outputs['color_reprojection'][frame_id]
+            reprojection_losses.append(self.compute_reprojection_loss(pred, target))
+
+        reprojection_losses = torch.cat(reprojection_losses, 1)  # (M, 2, h, w)
+
+        ## automasking
+        identity_reprojection_losses = []
+        for frame_id in range(len(outputs['color_reprojection'])):
+            pred = inputs["color_source_imgs"][frame_id]
+            identity_reprojection_losses.append(
+                self.compute_reprojection_loss(pred, target))
+
+        identity_reprojection_losses = torch.cat(identity_reprojection_losses, 1)
+
+        if self.opt.avg_reprojection:
+            identity_reprojection_loss = identity_reprojection_losses.mean(1, keepdim=True)
+        else:
+            # save both images, and do min all at once below
+            identity_reprojection_loss = identity_reprojection_losses
+
+        if self.opt.avg_reprojection:
+            reprojection_loss = reprojection_losses.mean(1, keepdim=True)
+        else:
+            reprojection_loss = reprojection_losses
+
+        if not self.opt.disable_automasking:
+            # add random numbers to break ties
+            identity_reprojection_loss += torch.randn(
+                identity_reprojection_loss.shape).cuda() * 0.00001
+
+            combined = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
+        else:
+            combined = reprojection_loss
+
+        if combined.shape[1] == 1:
+            to_optimise = combined
+        else:
+            to_optimise, idxs = torch.min(combined, dim=1)
+
+        loss += to_optimise.mean()
+
+        mean_disp = disp.mean(2, True).mean(3, True)
+        norm_disp = disp / (mean_disp + 1e-7)
+        smooth_loss = get_smooth_loss(norm_disp, color)
+
+        loss += self.opt.disparity_smoothness * smooth_loss
+        
+        total_loss += loss
+        losses["loss_depth_ct"] = self.depth_loss_weight * total_loss  # depth consistency loss
+        return losses
+    
+    def generate_image_pred(self, inputs, outputs):
+        color_source_imgs_list = []
+        for idx in range(inputs['source_imgs'].shape[1]):
+            color_source = inputs['source_imgs'][:, idx]
+            color_source = rearrange(color_source, 'b num_view c h w -> (b num_view) c h w')
+            color_source_imgs_list.append(color_source)
+        inputs['color_source_imgs'] = color_source_imgs_list
+
+        inv_K = inputs['inv_K'][:, self.render_view_indices]
+        K = inputs['K'][:, self.render_view_indices]
+        inv_K = rearrange(inv_K, 'b num_view dim4 Dim4 -> (b num_view) dim4 Dim4')
+        K = rearrange(K, 'b num_view dim4 Dim4 -> (b num_view) dim4 Dim4')
+
+        # rescale the rendered depth
+        depth = outputs['render_depth'][:, self.render_view_indices]
+        depth = rearrange(depth, 'b num_view h w -> (b num_view) () h w')
+        depth = F.interpolate(
+            depth, self.depth_ssl_size, mode="bilinear", align_corners=False)
+        outputs['render_depth'] = depth
+
+        cam_T_cam = inputs["cam_T_cam"][:, :, self.render_view_indices]
+
+        ## 1) Depth to camera points
+        cam_points = self.backproject_depth(depth, inv_K)  # (M, 4, h*w)
+        len_temporal = cam_T_cam.shape[1]
+        color_reprojection_list = []
+        for frame_id in range(len_temporal):
+            T = cam_T_cam[:, frame_id]
+            T = rearrange(T, 'b num_view dim4 Dim4 -> (b num_view) dim4 Dim4')
+            ## 2) Camera points to adjacent image points
+            pix_coords = self.project_3d(cam_points, K, T)  # (M, h, w, 2)
+
+            ## 3) Reproject the adjacent image
+            color_source = inputs['color_source_imgs'][frame_id]  # (M, 3, h, w)
+            color_reprojection = F.grid_sample(
+                color_source,
+                pix_coords,
+                padding_mode="border", align_corners=True)
+            color_reprojection_list.append(color_reprojection)
+
+        outputs['color_reprojection'] = color_reprojection_list
+        outputs['target_imgs'] = rearrange(
+            inputs['target_imgs'], 'b num_view c h w -> (b num_view) c h w')
+
+    def compute_reprojection_loss(self, pred, target, no_ssim=False):
+        """Computes reprojection loss between a batch of predicted and target images
+        """
+        abs_diff = torch.abs(target - pred)
+        l1_loss = abs_diff.mean(1, True)
+
+        if no_ssim:
+            reprojection_loss = l1_loss
+        else:
+            ssim_loss = self.ssim(pred, target).mean(1, True)
+            reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
+
+        return reprojection_loss
     
     def prepare_gt_data(self, **kwargs):
         # Prepare the ground truth volume data for visualization
