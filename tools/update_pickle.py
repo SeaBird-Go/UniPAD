@@ -17,7 +17,9 @@ import mmengine
 import mmcv
 
 
-def add_occ_path(split=['train', 'val']):
+def update_infos(split=['train', 'val'],
+                 add_occ_path=True,
+                 add_scene_token=True,):
     """Add the absolute occupancy path in the Occ3D dataset to the pickle file.
 
     Args:
@@ -41,13 +43,17 @@ def add_occ_path(split=['train', 'val']):
         for info in mmcv.track_iter_progress(data_infos):
             sample = nuscenes.get('sample', info['token'])
             scene = nuscenes.get('scene', sample['scene_token'])
-            info['occ_path'] = \
-                './data/nuscenes/gts/%s/%s'%(scene['name'], info['token'])
+            
+            if add_occ_path:
+                info['occ_path'] = \
+                    './data/nuscenes/gts/%s/%s'%(scene['name'], info['token'])
+            if add_scene_token:
+                info['scene_token'] = sample['scene_token']
         
         ## start saving the pickle file
         filename, ext = osp.splitext(osp.basename(pickle_file))
         root_path = "./data/nuscenes"
-        new_filename = f"{filename}_occ{ext}"
+        new_filename = f"{filename}_v2{ext}"
         info_path = osp.join(root_path, new_filename)
         print(f"The results will be saved into {info_path}")
         mmcv.dump(data, info_path)
@@ -87,8 +93,8 @@ def add_lidarseg_path(split=['train', 'val']):
 if __name__ == '__main__':
     pickle_file = 'data/nuscenes/nuscenes_unified_infos_train.pkl'
     pickle_file = 'data/nuscenes/nuscenes_unified_infos_val.pkl'
-    # add_occ_path(['train', 'val'])
-    add_lidarseg_path(['train', 'val'])
+    update_infos(['train', 'val'], add_occ_path=True, add_scene_token=True)
+    # add_lidarseg_path(['train', 'val'])
     exit()
     data = mmengine.load(pickle_file)
     data_infos = data['infos']

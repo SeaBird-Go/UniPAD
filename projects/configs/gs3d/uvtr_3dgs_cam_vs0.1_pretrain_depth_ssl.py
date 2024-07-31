@@ -28,7 +28,8 @@ unified_voxel_shape = [
     int((point_cloud_range[5] - point_cloud_range[2]) / unified_voxel_size[2]),
 ]
 
-render_size = [90, 160]
+render_size = [180, 320]
+depth_ssl_size = [180, 320]
 
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True
@@ -93,7 +94,7 @@ model = dict(
         ),
         in_channels=128,
         use_semantic=True,
-        depth_ssl_size=[180, 320],  # the image size for image warping in depth SSL
+        depth_ssl_size=depth_ssl_size,  # the image size for image warping in depth SSL
         render_scale=[render_size[0] / 900, 
                       render_size[1] / 1600],
         render_head_cfg=dict(
@@ -150,7 +151,8 @@ train_pipeline = [
     ),
     dict(
         type='PrepapreImageInputs',
-        input_size=[180, 320],
+        input_size=depth_ssl_size,
+        to_float32=True,
     ),
     dict(type='LoadLiDARSegGTFromFile'),
     dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
@@ -182,18 +184,18 @@ test_pipeline = [
         to_float32=True,
         file_client_args=file_client_args,
     ),
-    dict(
-        type='PrepapreImageInputs',
-        input_size=[180, 320],
-        to_float32=True,
-    ),
+    # dict(
+    #     type='PrepapreImageInputs',
+    #     input_size=depth_ssl_size,
+    #     to_float32=True,
+    # ),
     dict(type='LoadLiDARSegGTFromFile'),
     dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
     dict(type="NormalizeMultiviewImage", **img_norm_cfg),
     dict(type="PadMultiViewImage", size_divisor=32),
     dict(type="PointToMultiViewDepth",
          render_scale=[render_size[0] / 900, 
-                      render_size[1] / 1600],
+                       render_size[1] / 1600],
          render_size=render_size),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
     dict(type="CollectUnified3D", keys=["points", "img",

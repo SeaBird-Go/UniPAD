@@ -271,7 +271,7 @@ checkpoint_config = dict(max_keep_ckpts=1, interval=1)
 
 find_unused_parameters = True
 runner = dict(type="EpochBasedRunner", max_epochs=total_epochs)
-load_from = "work_dirs/uvtr_3dgs_cam_vs0.1_pretrain_rescale_z_axis_half/epoch_12.pth"
+load_from = "work_dirs/uvtr_cam_vs0.1_pretrain/epoch_12.pth"
 resume_from = None
 # fp16 setting
 fp16 = dict(loss_scale=32.0)

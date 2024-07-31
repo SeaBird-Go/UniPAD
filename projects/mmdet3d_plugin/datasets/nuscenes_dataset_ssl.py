@@ -110,10 +110,10 @@ class NuScenesSweepDatasetSSL(NuScenesSweepDataset):
         """
         input_dict = super().get_data_info(index)
 
-        curr_cam_to_ego = np.stack(input_dict['cam2camego'])  # (6, 4, 4)
-        curr_camego_to_global = np.stack(input_dict['camego2global'])  # (6, 4, 4)
-
         if self.use_depth_consistency:
+            curr_cam_to_ego = np.stack(input_dict['cam2camego'])  # (6, 4, 4)
+            curr_camego_to_global = np.stack(input_dict['camego2global'])  # (6, 4, 4)
+
             cam_intrinsic = np.stack(input_dict['cam_intrinsic'])
             input_dict['K'] = torch.from_numpy(cam_intrinsic).to(torch.float32)  # (6, 4, 4)
             
@@ -122,7 +122,12 @@ class NuScenesSweepDatasetSSL(NuScenesSweepDataset):
             for idx in self.extra_frames:
                 adj_idx = index + idx
                 
-                adj_info = self.data_infos[adj_idx]
+                select_id = max(min(adj_idx, len(self) - 1), 0)
+                adj_info = self.data_infos[select_id]
+                curr_info = self.data_infos[index]
+                if adj_info['scene_token'] != curr_info['scene_token']:
+                    adj_info = curr_info
+                
                 info_adj_list.append(adj_info)
 
                 adj_global_to_ego_list,  adj_ego_to_cam_list = [], []

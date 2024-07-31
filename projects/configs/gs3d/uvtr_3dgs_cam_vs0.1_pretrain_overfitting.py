@@ -28,7 +28,7 @@ unified_voxel_shape = [
     int((point_cloud_range[5] - point_cloud_range[2]) / unified_voxel_size[2]),
 ]
 
-render_size = [90, 160]
+render_size = [180, 320]
 
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True
@@ -99,7 +99,7 @@ model = dict(
             volume_size=unified_voxel_shape,
             learn_gs_scale_rot=True,
             offset_scale=0.5,
-            rescale_z_axis=True,
+            # rescale_z_axis=True,
             gs_scale=0.6,
             gs_scale_min=0.2,
             gs_scale_max=0.7,
